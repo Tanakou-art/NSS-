@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,"Hiragino Sans","Meiryo",sans-serif;background:#f4f6f8;color:#1f2933}
+  .card{max-width:380px;margin:12vh auto;background:#fff;border-radius:16px;padding:28px;text-align:center;box-shadow:0 2px 12px #0001}
+  .sub{color:#667;margin:0}h1{margin:.2em 0 .8em}
+  input{width:100%;font-size:18px;padding:12px;border:1px solid #bbc;border-radius:10px;margin-bottom:12px}
+  button{font-size:16px;padding:10px 16px;border:0;border-radius:10px;background:#2563eb;color:#fff;cursor:pointer}
+  button.ghost{background:#e5e7eb;color:#333}
+  .card button{width:100%;padding:14px;font-size:18px}
+  .ok{color:#15803d;font-weight:700;font-size:18px}
+  .bar{display:flex;gap:8px;align-items:center;padding:12px 16px;background:#fff;box-shadow:0 1px 4px #0001;flex-wrap:wrap}
+  .sp{flex:1}
+  .front{margin:14px auto 6px;text-align:center;color:#667;font-size:13px}
+  .grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;padding:8px 16px 24px;max-width:1100px;margin:0 auto}
+  .seat{background:#fff;border:2px solid #d5dae1;border-radius:10px;min-height:76px;padding:6px;text-align:center;
+        display:flex;flex-direction:column;justify-content:center}
+  .seat small{color:#889;font-size:11px}
+  .seat b{font-size:15px;word-break:break-all}
+  .seat.on{background:#dbeafe;border-color:#2563eb;cursor:pointer}
+  .seat.absent{background:#fef3c7;border-color:#d97706;border-style:dashed;cursor:pointer}
+  .seat.absent small{color:#b45309}
+  .tag{font-size:10px;color:#b45309}
+  .modal-bg{position:fixed;inset:0;background:#0006;display:flex;align-items:center;justify-content:center;z-index:9}
+  .modal{background:#fff;border-radius:14px;padding:22px;min-width:240px;text-align:center}
+  .modal h3{margin:0 0 16px}
+  .modal button{display:block;width:100%;margin-bottom:8px}
+  .qrs{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;padding:16px;max-width:1100px;margin:0 auto}
+  .qr{background:#fff;border:1px solid #ccd;padding:8px;text-align:center}
+  .qr div{display:flex;justify-content:center}.qr b{display:block;margin-top:4px;font-size:18px}
+  table{border-collapse:collapse;background:#fff}td,th{border:1px solid #d5dae1;padding:6px 12px;font-size:14px;text-align:left}
+  @media print{.bar{display:none}body{background:#fff}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+const CFG = <?!= cfg ?>;
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const run = (fn, ...a) => new Promise((ok, ng) =>
+  google.script.run.withSuccessHandler(ok).withFailureHandler(ng)[fn](...a));
+const ids = [];
+CFG.rows.forEach(r => { for (let c = 1; c <= CFG.cols; c++) ids.push(r + c); });
+
+/* ---------- 生徒画面 ---------- */
+function student() {
+  const id = CFG.seat, app = $('#app');
+  if (!id) { app.innerHTML = '<div class="card"><h1>QRコードが無効です</h1><p>座席のQRコードをもう一度読み取ってください。</p></div>'; return; }
+  app.innerHTML = `<div class="card"><p class="sub">自習室</p><h1>席 ${id}</h1>
+    <div id="form"><input id="nm" maxlength="30" placeholder="名前を入力" autocomplete="name">
+    <button id="go">着席する</button></div><p id="msg"></p></div>`;
+  const msg = t => $('#msg').textContent = t;
+  $('#go').onclick = async () => {
+    const n = $('#nm').value.trim();
+    if (!n) return msg('名前を入力してください');
+    try {
+      let r = await run('checkIn', id, n, false);
+      if (r.status === 'occupied' && confirm('この席はすでに他の人が登録されています。上書きしますか？'))
+        r = await run('checkIn', id, n, true);
+      if (r.status === 'ok') done(n); else if (r.status !== 'occupied') msg('登録できませんでした');
+    } catch (e) { msg('通信エラー：もう一度お試しください'); }
+  };
+  function done(n) {
+    $('#form').innerHTML = `<p class="ok">${esc(n)} さん、登録しました ✓</p><button id="out" class="ghost">退席する</button>`;
+    $('#out').onclick = async () => { await run('checkOut', id); $('#form').innerHTML = '<p>退席しました。おつかれさまでした。</p>'; };
+  }
+}
+
+/* ---------- 管理者画面 ---------- */
+function admin() {
+  $('#app').innerHTML = `<div class="bar"><b id="cnt"></b><span class="sp"></span>
+    <button id="t1">座席表</button><button id="t2" class="ghost">QR印刷</button><button id="t3" class="ghost">ログ</button>
+    <button id="clr" class="ghost">全員退席</button></div>
+    <div id="v1"><div class="front">▲ 前（黒板側）</div><div class="grid" id="grid"></div></div>
+    <div id="v2" hidden><div class="bar" style="box-shadow:none"><button onclick="print()">印刷する</button></div><div class="qrs" id="qrs"></div></div>
+    <div id="v3" hidden><div class="bar" style="box-shadow:none"><input id="ld" type="date" style="width:auto;margin:0"><button id="lgo">表示</button><a id="lsh" target="_blank" style="margin-left:auto">スプレッドシートで開く</a></div><div style="padding:16px;overflow-x:auto"><table id="lt"></table></div></div>`;
+  let data = {}, day = '';
+  const draw = () => {
+    $('#grid').innerHTML = ids.map(i => {
+      const s = data[i];
+      const cls = s ? (s.absent ? 'absent' : 'on') : '';
+      return `<div class="seat ${cls}" data-id="${i}"><small>${i}</small><b>${s ? esc(s.n) : ''}</b>${s && s.absent ? '<span class="tag">不在</span>' : ''}</div>`;
+    }).join('');
+    const present = Object.values(data).filter(s => !s.absent).length;
+    $('#cnt').textContent = `${day}　在室 ${present} / ${ids.length}（不在 ${Object.keys(data).length - present}）`;
+  };
+  const refresh = async () => { try { const r = await run('getSeats', CFG.key); data = r.seats; day = r.date; draw(); } catch (e) {} };
+  const openMenu = id => {
+    const s = data[id]; if (!s) return;
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal"><h3>${id}（${esc(s.n)}）</h3>
+      <button id="mAbs">${s.absent ? '在席に戻す' : '不在にする'}</button>
+      <button id="mOut" class="ghost">退席させる（削除）</button>
+      <button id="mCancel" class="ghost">キャンセル</button></div>`;
+    document.body.appendChild(bg);
+    const close = () => bg.remove();
+    bg.onclick = e => { if (e.target === bg) close(); };
+    bg.querySelector('#mCancel').onclick = close;
+    bg.querySelector('#mAbs').onclick = async () => { close(); await run('setAbsent', CFG.key, id, !s.absent); refresh(); };
+    bg.querySelector('#mOut').onclick = async () => {
+      close();
+      if (confirm(`${id}（${s.n}）を退席にしますか？`)) { await run('clearSeats', CFG.key, id); refresh(); }
+    };
+  };
+  $('#grid').onclick = e => {
+    const c = e.target.closest('.seat.on, .seat.absent'); if (!c) return;
+    openMenu(c.dataset.id);
+  };
+  $('#clr').onclick = async () => { if (confirm('全員を退席にしますか？')) { await run('clearSeats', CFG.key); refresh(); } };
+  const tab = n => { $('#v1').hidden = n !== 1; $('#v2').hidden = n !== 2; $('#v3').hidden = n !== 3; };
+  $('#t1').onclick = () => tab(1);
+  const showLog = async () => {
+    const d = $('#ld').value; if (!d) return;
+    const r = await run('getLog', CFG.key, d);
+    $('#lsh').href = r.url;
+    $('#lt').innerHTML = '<tr><th>時刻</th><th>席</th><th>名前</th><th>操作</th></tr>' +
+      (r.rows.map(x => `<tr><td>${esc(x[1])}</td><td>${esc(x[2])}</td><td>${esc(x[3])}</td><td>${esc(x[4])}</td></tr>`).join('')
+       || '<tr><td colspan="4">この日の記録はありません</td></tr>');
+  };
+  $('#t3').onclick = () => { tab(3); if (!$('#ld').value) $('#ld').value = day; showLog(); };
+  $('#lgo').onclick = showLog;
+  $('#t2').onclick = () => {
+    tab(2);
+    if ($('#qrs').children.length) return;
+    ids.forEach(i => {
+      const d = document.createElement('div'); d.className = 'qr'; d.innerHTML = '<div></div><b>' + i + '</b>';
+      $('#qrs').appendChild(d);
+      new QRCode(d.firstChild, { text: CFG.url + '?seat=' + i, width: 110, height: 110 });
+    });
+  };
+  refresh(); setInterval(refresh, 10000);
+}
+
+CFG.mode === 'admin' ? admin() : student();
+</script>
+</body>
+</html>
